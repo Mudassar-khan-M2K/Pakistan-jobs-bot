@@ -6,191 +6,200 @@ const {
   useMultiFileAuthState,
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
-const express = require("express");
 const fs = require("fs");
-const { saveSessionToDB, loadSessionFromDB, decodeLevanter } = require("./session");
-const { startScheduler, setSocket } = require("./scheduler");
-const { fetchAllJobs, fetchGovtJobs, fetchPrivateJobs, fetchNJPJobs, fetchPunjabJobs } = require("./scraper");
-const { formatJobList, getMenuMessage, getAboutMessage } = require("./formatter");
+const path = require("path");
+const express = require("express");
+const { restoreSession, backupSession } = require("./session");
+const { handleMessage } = require("./formatter");
+const { startScheduler, stopScheduler } = require("./scheduler");
 
-// Keep-alive server
+const AUTH_DIR = "/tmp/auth_info";
+const PHONE_NUMBER = process.env.PHONE_NUMBER || "923216046022";
+
+// ─── Express Keep-Alive ───────────────────────────────────────────────────────
 const app = express();
-const PORT = process.env.PORT || 3000;
 app.get("/", (req, res) => res.send("🤖 Pakistan Jobs Bot is running!"));
-app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime() }));
-app.listen(PORT, () => console.log("Server on port " + PORT));
+app.get("/health", (req, res) =>
+  res.json({ status: "ok", uptime: process.uptime(), pid: process.pid })
+);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`[Server] Keep-alive listening on port ${PORT}`));
 
-const PHONE_NUMBER = (process.env.PHONE_NUMBER || "923216046022").replace(/[^0-9]/g, "");
-const SESSION_ID = process.env.SESSION_ID || "levanter_224192240326c64b71a91a7f15d95d7efa";
-const AUTH_FOLDER = "/tmp/auth_info";
+// ─── Bot State ────────────────────────────────────────────────────────────────
+let botSocket = null;
+let isConnected = false;
+let startTime = Date.now();
+let reconnectAttempts = 0;
 
-// Step 1: Try to restore session from DB, then Levanter
-async function prepareSession() {
-  if (!fs.existsSync(AUTH_FOLDER)) fs.mkdirSync(AUTH_FOLDER, { recursive: true });
-
-  // Check if creds.json already exists
-  if (fs.existsSync(`${AUTH_FOLDER}/creds.json`)) {
-    console.log("✅ Session already on disk");
-    return true;
-  }
-
-  // Try restore from PostgreSQL DB
-  try {
-    const data = await loadSessionFromDB();
-    if (data && Object.keys(data).length > 0) {
-      for (const [filename, content] of Object.entries(data)) {
-        const fname = filename.includes(".json") ? filename : `${filename}.json`;
-        fs.writeFileSync(`${AUTH_FOLDER}/${fname}`, JSON.stringify(content));
-      }
-      console.log("✅ Session restored from DB");
-      return true;
-    }
-  } catch (e) {
-    console.log("DB restore skipped:", e.message);
-  }
-
-  // Try Levanter session ID
-  if (SESSION_ID && SESSION_ID.startsWith("levanter_")) {
-    console.log("🔑 Trying to decode Levanter session...");
-    const ok = await decodeLevanter(SESSION_ID);
-    if (ok) return true;
-  }
-
-  console.log("⚠️ No existing session found, will need pairing code");
-  return false;
+function getUptime() {
+  const sec = Math.floor((Date.now() - startTime) / 1000);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return `${h}h ${m}m`;
 }
 
-// Backup session files to DB after connect
-async function backupSession() {
-  try {
-    if (!fs.existsSync(AUTH_FOLDER)) return;
-    const files = fs.readdirSync(AUTH_FOLDER);
-    const data = {};
-    for (const file of files) {
-      try {
-        data[file] = JSON.parse(fs.readFileSync(`${AUTH_FOLDER}/${file}`, "utf8"));
-      } catch (e) {}
-    }
-    if (Object.keys(data).length > 0) {
-      await saveSessionToDB(data);
-      console.log("✅ Session backed up to DB");
-    }
-  } catch (err) {
-    console.error("Session backup failed:", err.message);
-  }
-}
-
+// ─── Main Bot Function ────────────────────────────────────────────────────────
 async function startBot() {
-  console.log("🚀 Starting Pakistan Jobs Bot...");
+  try {
+    console.log("[Bot] Starting Pakistan Jobs Bot...");
 
-  await prepareSession();
-
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
-  const { version } = await fetchLatestBaileysVersion();
-  console.log("Baileys version:", version.join("."));
-
-  const sock = makeWASocket({
-    version,
-    logger: pino({ level: "silent" }),
-    printQRInTerminal: false,
-    auth: state,
-    browser: ["Ubuntu", "Chrome", "120.0.0.0"],
-    connectTimeoutMs: 60000,
-    keepAliveIntervalMs: 25000,
-  });
-
-  // Only request pairing if not registered via session
-  if (!state.creds.registered) {
-    console.log("📱 No session found. Requesting pairing code for:", PHONE_NUMBER);
-    await new Promise(r => setTimeout(r, 3000));
-    try {
-      const code = await sock.requestPairingCode(PHONE_NUMBER);
-      console.log("================================================");
-      console.log("   🔑 PAIRING CODE: " + code);
-      console.log("================================================");
-      console.log("WhatsApp > Settings > Linked Devices > Link with Phone Number");
-      console.log("Enter: " + code);
-    } catch (err) {
-      console.error("Pairing code error:", err.message);
-      setTimeout(startBot, 20000);
-      return;
-    }
-  } else {
-    console.log("✅ Session loaded! Connecting without pairing...");
-  }
-
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect } = update;
-
-    if (connection === "open") {
-      console.log("✅ WhatsApp connected! Bot is live 🚀");
-      setSocket(sock);
-      startScheduler();
-      await backupSession();
+    // Ensure auth dir exists
+    if (!fs.existsSync(AUTH_DIR)) {
+      fs.mkdirSync(AUTH_DIR, { recursive: true });
     }
 
-    if (connection === "close") {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      console.log("Connection closed, code:", code);
-      if (code === DisconnectReason.loggedOut) {
-        console.log("Logged out! Clearing session...");
-        try { fs.rmSync(AUTH_FOLDER, { recursive: true }); } catch(e) {}
-      } else {
-        console.log("Reconnecting in 5s...");
-        setTimeout(startBot, 5000);
-      }
+    // Restore session from DB if no local creds
+    const credsPath = path.join(AUTH_DIR, "creds.json");
+    if (!fs.existsSync(credsPath)) {
+      console.log("[Session] No local creds found. Attempting DB restore...");
+      await restoreSession(AUTH_DIR);
+    } else {
+      console.log("[Session] Local creds found. Using existing session.");
     }
-  });
 
-  sock.ev.on("creds.update", async () => {
-    await saveCreds();
-    await backupSession();
-  });
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`[Baileys] Using WA version: ${version.join(".")}, isLatest: ${isLatest}`);
 
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-    for (const msg of messages) {
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+    const sock = makeWASocket({
+      version,
+      logger: pino({ level: "silent" }),
+      printQRInTerminal: false,
+      auth: state,
+      browser: ["Ubuntu", "Chrome", "120.0.0.0"],
+      connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000,
+      retryRequestDelayMs: 2000,
+      maxMsgRetryCount: 3,
+    });
+
+    botSocket = sock;
+
+    // ─── Pairing Code ─────────────────────────────────────────────────────────
+    if (!state.creds.registered) {
+      console.log("[Auth] Not registered. Waiting for WebSocket to open...");
+
+      await new Promise((resolve) => {
+        const interval = setInterval(() => {
+          if (sock.ws && sock.ws.readyState === 1) {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 300);
+        // Timeout after 10 seconds regardless
+        setTimeout(() => {
+          clearInterval(interval);
+          resolve();
+        }, 10000);
+      });
+
       try {
-        if (!msg.message || msg.key.fromMe) continue;
-        const from = msg.key.remoteJid;
-        if (from.endsWith("@g.us")) continue;
-
-        const text =
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text || "";
-        const input = text.trim().toLowerCase();
-        console.log("Msg from " + from + ": " + input);
-
-        if (["menu","hi","hello","start","salam",""].includes(input)) {
-          await sock.sendMessage(from, { text: getMenuMessage() });
-        } else if (input === "1") {
-          await sock.sendMessage(from, { text: "⏳ Fetching Govt jobs..." });
-          await sock.sendMessage(from, { text: formatJobList(await fetchGovtJobs(), "Government Jobs 🏛️") });
-        } else if (input === "2") {
-          await sock.sendMessage(from, { text: "⏳ Fetching Private jobs..." });
-          await sock.sendMessage(from, { text: formatJobList(await fetchPrivateJobs(), "Private Jobs 🏢") });
-        } else if (input === "3") {
-          await sock.sendMessage(from, { text: "⏳ Fetching Punjab jobs..." });
-          await sock.sendMessage(from, { text: formatJobList(await fetchPunjabJobs(), "Punjab Jobs 🌿") });
-        } else if (input === "4") {
-          await sock.sendMessage(from, { text: "⏳ Fetching NJP jobs..." });
-          await sock.sendMessage(from, { text: formatJobList(await fetchNJPJobs(), "NJP Jobs 📌") });
-        } else if (input === "5") {
-          await sock.sendMessage(from, { text: "⏳ Fetching all jobs..." });
-          await sock.sendMessage(from, { text: formatJobList(await fetchAllJobs(), "All Pakistan Jobs 🇵🇰") });
-        } else if (input === "6") {
-          await sock.sendMessage(from, { text: getAboutMessage() });
-        } else {
-          await sock.sendMessage(from, { text: getMenuMessage() });
-        }
+        const code = await sock.requestPairingCode(PHONE_NUMBER);
+        console.log("╔══════════════════════════════════════╗");
+        console.log("║                                      ║");
+        console.log(`║   PAIRING CODE: ${code.padEnd(20)} ║`);
+        console.log("║                                      ║");
+        console.log("╚══════════════════════════════════════╝");
+        console.log("[Auth] Enter this code in WhatsApp > Linked Devices > Link a Device");
       } catch (err) {
-        console.error("Message error:", err.message);
+        console.error("[Auth] Failed to get pairing code:", err.message);
       }
     }
-  });
+
+    // ─── Connection Events ────────────────────────────────────────────────────
+    sock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+
+      if (connection === "connecting") {
+        console.log("[Connection] Connecting to WhatsApp...");
+      }
+
+      if (connection === "open") {
+        console.log("[Connection] ✅ Connected to WhatsApp!");
+        isConnected = true;
+        reconnectAttempts = 0;
+
+        // Backup session to DB
+        await backupSession(AUTH_DIR);
+
+        // Start job scheduler after 30 seconds
+        setTimeout(() => {
+          startScheduler(sock);
+          console.log("[Scheduler] Job scheduler started!");
+        }, 30000);
+      }
+
+      if (connection === "close") {
+        isConnected = false;
+        stopScheduler();
+
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const reason = Object.keys(DisconnectReason).find(
+          (k) => DisconnectReason[k] === statusCode
+        );
+
+        console.log(`[Connection] Disconnected. Reason: ${reason || statusCode}`);
+
+        if (statusCode === DisconnectReason.loggedOut) {
+          console.log("[Connection] Logged out! Clearing session...");
+          try {
+            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+          } catch (e) {
+            console.error("[Session] Failed to clear session:", e.message);
+          }
+          console.log("[Connection] Session cleared. Please restart the bot to re-pair.");
+          process.exit(1);
+        } else {
+          reconnectAttempts++;
+          const delay = Math.min(5000 * reconnectAttempts, 30000);
+          console.log(`[Connection] Reconnecting in ${delay / 1000}s... (attempt ${reconnectAttempts})`);
+          setTimeout(startBot, delay);
+        }
+      }
+    });
+
+    // ─── Credentials Update ───────────────────────────────────────────────────
+    sock.ev.on("creds.update", async () => {
+      await saveCreds();
+      await backupSession(AUTH_DIR);
+    });
+
+    // ─── Messages ─────────────────────────────────────────────────────────────
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      if (type !== "notify") return;
+
+      for (const msg of messages) {
+        try {
+          // Skip group messages
+          if (msg.key.remoteJid?.endsWith("@g.us")) continue;
+          // Skip messages from self
+          if (msg.key.fromMe) continue;
+          // Skip status updates
+          if (msg.key.remoteJid === "status@broadcast") continue;
+          // Skip newsletter messages
+          if (msg.key.remoteJid?.endsWith("@newsletter")) continue;
+
+          await handleMessage(sock, msg, getUptime);
+        } catch (err) {
+          console.error("[Messages] Error handling message:", err.message);
+        }
+      }
+    });
+
+    return sock;
+  } catch (err) {
+    console.error("[Bot] Fatal error:", err.message);
+    reconnectAttempts++;
+    const delay = Math.min(5000 * reconnectAttempts, 30000);
+    console.log(`[Bot] Retrying in ${delay / 1000}s...`);
+    setTimeout(startBot, delay);
+  }
 }
 
-startBot().catch(err => {
-  console.error("Fatal:", err);
-  process.exit(1);
-});
+// ─── Start ────────────────────────────────────────────────────────────────────
+console.log("🇵🇰 Pakistan Jobs Bot — Starting up...");
+startBot();
+
+// Export for other modules
+module.exports = { getSocket: () => botSocket, isConnected: () => isConnected, getUptime };

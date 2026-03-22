@@ -1,164 +1,299 @@
-// ─── Format a single job post ────────────────────────────────────────────────
-function formatJob(job, index = null) {
-  const badge = job.type === "Govt" ? "🏛️ *GOVT JOB*" : "🏢 *PRIVATE JOB*";
-  const sourceBadge =
-    job.source === "NJP"
-      ? "📌 National Job Portal"
-      : job.source === "Punjab Portal"
-      ? "📌 Punjab Jobs Portal"
-      : "📌 Rozee.pk";
+const {
+  fetchAllJobs,
+  fetchGovtJobs,
+  fetchPrivateJobs,
+  fetchNJPJobs,
+  fetchPunjabJobs,
+} = require("./scraper");
 
-  const num = index !== null ? `*${index + 1}.* ` : "";
+// ─── Stats Tracking ───────────────────────────────────────────────────────────
+const stats = {
+  jobsFetchedToday: 0,
+  totalMessages: 0,
+  lastFetch: null,
+  sourceCounts: { NJP: 0, "Punjab Portal": 0, "Rozee.pk": 0 },
+};
 
-  return (
-    `${num}${badge}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `💼 *Position:* ${job.title}\n` +
-    `🏢 *Organization:* ${job.dept}\n` +
-    `📍 *Location:* ${job.location}\n` +
-    `📅 *Last Date:* ${job.deadline}\n` +
-    `${sourceBadge}\n` +
-    `🔗 *Apply:* ${job.link}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━`
-  );
+function updateStats(jobs) {
+  stats.jobsFetchedToday += jobs.length;
+  stats.lastFetch = getPakistanTime();
+  jobs.forEach((j) => {
+    if (stats.sourceCounts[j.source] !== undefined) stats.sourceCounts[j.source]++;
+  });
 }
 
-// ─── Format a list of jobs ────────────────────────────────────────────────────
-function formatJobList(jobs, title = "📋 Latest Pakistan Jobs") {
+// ─── Time Helper ──────────────────────────────────────────────────────────────
+function getPakistanTime() {
+  return new Date().toLocaleString("en-PK", {
+    timeZone: "Asia/Karachi",
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+// ─── Menu ─────────────────────────────────────────────────────────────────────
+function buildMenu() {
+  return `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🇵🇰  *PAKISTAN JOBS BOT v2.0*  🤖
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Assalam o Alaikum! 👋
+Pakistan ka #1 Job Alert Bot!
+
+📋 *JOBS MENU*
+━━━━━━━━━━━━━━━
+1️⃣  🏛️  Govt Jobs (Latest)
+2️⃣  🏢  Private Jobs (Latest)
+3️⃣  🌿  Punjab Govt Jobs
+4️⃣  📌  NJP — National Portal
+5️⃣  🇵🇰  All Jobs Today
+━━━━━━━━━━━━━━━
+⚙️  *BOT COMMANDS*
+━━━━━━━━━━━━━━━
+!ping    — Check bot status
+!time    — Pakistan time
+!stats   — Bot statistics
+!about   — About this bot
+!help    — Show this menu
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💬 Reply with number (1-5) or command
+📢 Auto updates every 20 minutes!
+⏰ ${getPakistanTime()}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+}
+
+// ─── Format a Single Job ──────────────────────────────────────────────────────
+function formatSingleJob(job, index) {
+  const icon = job.type === "Govt" ? "🏛️" : "🏢";
+  const typeLabel = job.type === "Govt" ? "GOVT JOB" : "PRIVATE JOB";
+
+  return `${index ? index + ". " : ""}${icon} *${typeLabel}*
+━━━━━━━━━━━━━━━━━━━━━
+💼 *Position:* ${job.title}
+🏢 *Organization:* ${job.organization}
+📍 *Location:* ${job.location}
+📅 *Last Date:* ${job.deadline}
+📌 *Source:* ${job.source}
+🔗 *Apply Here:* ${job.link}
+━━━━━━━━━━━━━━━━━━━━━`;
+}
+
+// ─── Format a List of Jobs ────────────────────────────────────────────────────
+function formatJobList(jobs, title, emoji) {
   if (!jobs || jobs.length === 0) {
-    return `❌ No jobs found at the moment. Please try again later.`;
+    return `${emoji} *${title}*\n\n❌ No jobs found right now. Try again in a few minutes!\n📢 Jobs auto-update every 20 minutes.`;
   }
 
-  const header =
-    `🇵🇰 *${title}*\n` +
-    `🕐 Updated: ${getPKTime()}\n` +
-    `📊 Total: ${jobs.length} jobs\n\n`;
+  let msg = `${emoji} *${title}*\n`;
+  msg += `🕐 ${getPakistanTime()}\n`;
+  msg += `📊 Showing ${jobs.length} job(s)\n`;
+  msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
 
-  const body = jobs.map((job, i) => formatJob(job, i)).join("\n\n");
+  jobs.forEach((job, i) => {
+    msg += formatSingleJob(job, i + 1) + "\n\n";
+  });
 
-  const footer =
-    `\n\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🤖 *Pakistan Jobs Bot*\n` +
-    `📢 Follow our channel for daily updates!\n` +
-    `⏰ Updates every 20 minutes`;
-
-  return header + body + footer;
-}
-
-// ─── Format channel post (shorter, cleaner) ───────────────────────────────────
-function formatChannelPost(jobs) {
-  if (!jobs || jobs.length === 0) return null;
-
-  const govtJobs = jobs.filter((j) => j.type === "Govt");
-  const privateJobs = jobs.filter((j) => j.type === "Private");
-
-  let msg =
-    `🇵🇰 *PAKISTAN JOBS UPDATE*\n` +
-    `🕐 ${getPKTime()}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n\n`;
-
-  if (govtJobs.length > 0) {
-    msg += `🏛️ *GOVERNMENT JOBS (${govtJobs.length})*\n\n`;
-    govtJobs.slice(0, 5).forEach((job, i) => {
-      msg +=
-        `*${i + 1}. ${job.title}*\n` +
-        `   🏢 ${job.dept}\n` +
-        `   📍 ${job.location}\n` +
-        `   📅 Last Date: ${job.deadline}\n` +
-        `   🔗 ${job.link}\n\n`;
-    });
-  }
-
-  if (privateJobs.length > 0) {
-    msg += `\n🏢 *PRIVATE JOBS (${privateJobs.length})*\n\n`;
-    privateJobs.slice(0, 3).forEach((job, i) => {
-      msg +=
-        `*${i + 1}. ${job.title}*\n` +
-        `   🏢 ${job.dept}\n` +
-        `   📍 ${job.location}\n` +
-        `   📅 Last Date: ${job.deadline}\n` +
-        `   🔗 ${job.link}\n\n`;
-    });
-  }
-
-  msg +=
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🤖 *Pakistan Jobs Bot*\n` +
-    `📢 Share with friends & family!\n` +
-    `🔔 Subscribe for updates every 20 min`;
+  msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  msg += "🤖 Pakistan Jobs Bot\n";
+  msg += "📢 Share with family & friends!";
 
   return msg;
 }
 
-// ─── Menu message ─────────────────────────────────────────────────────────────
-function getMenuMessage() {
-  return (
-    `🇵🇰 *PAKISTAN JOBS BOT* 🤖\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `Assalam o Alaikum! 👋\n` +
-    `Welcome to Pakistan's #1 Job Alert Bot!\n\n` +
-    `📋 *MAIN MENU*\n\n` +
-    `1️⃣  Latest Govt Jobs\n` +
-    `2️⃣  Latest Private Jobs\n` +
-    `3️⃣  Punjab Jobs Portal\n` +
-    `4️⃣  National Job Portal (NJP)\n` +
-    `5️⃣  All Jobs Today\n` +
-    `6️⃣  ℹ️  About Bot\n\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `💬 *Reply with a number (1-6)*\n` +
-    `📢 Or join our channel for auto updates!\n\n` +
-    `🕐 ${getPKTime()}`
-  );
+// ─── Channel Broadcast Format ─────────────────────────────────────────────────
+function formatChannelPost(allJobs) {
+  const govtJobs = allJobs.filter((j) => j.type === "Govt");
+  const privateJobs = allJobs.filter((j) => j.type === "Private");
+
+  let msg = `🇵🇰 *PAKISTAN JOBS UPDATE* 🔔\n`;
+  msg += `🕐 ${getPakistanTime()}\n`;
+  msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
+
+  if (govtJobs.length > 0) {
+    msg += `🏛️ *GOVERNMENT JOBS (${govtJobs.length})*\n\n`;
+    govtJobs.slice(0, 5).forEach((job, i) => {
+      msg += `*${i + 1}. ${job.title}*\n`;
+      msg += `   🏢 ${job.organization}\n`;
+      msg += `   📍 ${job.location}\n`;
+      msg += `   📅 Last Date: ${job.deadline}\n`;
+      msg += `   🔗 ${job.link}\n\n`;
+    });
+  }
+
+  if (privateJobs.length > 0) {
+    msg += `🏢 *PRIVATE JOBS (${privateJobs.length})*\n\n`;
+    privateJobs.slice(0, 5).forEach((job, i) => {
+      msg += `*${i + 1}. ${job.title}*\n`;
+      msg += `   🏢 ${job.organization}\n`;
+      msg += `   📍 ${job.location}\n`;
+      msg += `   📅 Last Date: ${job.deadline}\n`;
+      msg += `   🔗 ${job.link}\n\n`;
+    });
+  }
+
+  msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  msg += "🤖 Pakistan Jobs Bot\n";
+  msg += "📢 Share with family & friends!\n";
+  msg += "🔔 Updates every 20 minutes";
+
+  return msg;
 }
 
-// ─── About message ────────────────────────────────────────────────────────────
-function getAboutMessage() {
-  return (
-    `🤖 *PAKISTAN JOBS BOT*\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `📌 *Version:* 1.0\n` +
-    `🎯 *Purpose:* Automated Pakistan job alerts\n\n` +
-    `📊 *Sources:*\n` +
-    `   • National Job Portal (njp.gov.pk)\n` +
-    `   • Punjab Government Jobs Portal\n` +
-    `   • Rozee.pk (Private sector)\n\n` +
-    `⚙️ *Features:*\n` +
-    `   • Auto updates every 20 minutes\n` +
-    `   • Govt & Private jobs\n` +
-    `   • All Pakistan coverage\n` +
-    `   • Interactive menu\n\n` +
-    `📢 *Channel:* https://whatsapp.com/channel/0029Vb7fEeo59PwPuRwAae2J\n\n` +
-    `━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🇵🇰 Serving Pakistan since 2024\n` +
-    `💚 Made with ❤️ for Pakistanis`
-  );
+// ─── Command Responses ────────────────────────────────────────────────────────
+function buildPingResponse(getUptime) {
+  const uptime = typeof getUptime === "function" ? getUptime() : "N/A";
+  return `🏓 *Pong!* Bot is alive ✅\n\n⏱️ *Uptime:* ${uptime}\n🕐 *Time:* ${getPakistanTime()}\n\n🤖 Pakistan Jobs Bot is running smoothly!`;
 }
 
-// ─── Error message ────────────────────────────────────────────────────────────
-function getErrorMessage() {
-  return (
-    `❌ *Invalid option!*\n\n` +
-    `Please reply with a number from *1 to 6*\n\n` +
-    `Type *menu* to see options again 📋`
-  );
+function buildTimeResponse() {
+  return `🕐 *Pakistan Standard Time (PKT)*\n\n📅 ${getPakistanTime()}\n\n🇵🇰 UTC+5:00 — Karachi / Islamabad`;
 }
 
-// ─── Pakistan time ────────────────────────────────────────────────────────────
-function getPKTime() {
-  return new Date().toLocaleString("en-PK", {
-    timeZone: "Asia/Karachi",
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+function buildStatsResponse() {
+  return `📊 *BOT STATISTICS*
+━━━━━━━━━━━━━━━━━━━━━
+📌 *Jobs Fetched Today:* ${stats.jobsFetchedToday}
+💬 *Total Messages:* ${stats.totalMessages}
+🕐 *Last Fetch:* ${stats.lastFetch || "Not yet"}
+━━━━━━━━━━━━━━━━━━━━━
+📂 *By Source:*
+   🏛️ NJP: ${stats.sourceCounts["NJP"]}
+   🌿 Punjab: ${stats.sourceCounts["Punjab Portal"]}
+   🏢 Rozee.pk: ${stats.sourceCounts["Rozee.pk"]}
+━━━━━━━━━━━━━━━━━━━━━
+🤖 Pakistan Jobs Bot v2.0`;
+}
+
+function buildAboutResponse() {
+  return `🤖 *ABOUT PAKISTAN JOBS BOT*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🇵🇰 Pakistan ka #1 Job Alert Bot!
+
+📋 *What I Do:*
+• Scrape jobs every 20 minutes
+• Post Govt & Private jobs
+• Cover NJP, Punjab & Rozee.pk
+• 24/7 automatic updates
+
+📢 *Our Channel:*
+https://whatsapp.com/channel/0029Vb7fEeo59PwPuRwAae2J
+
+🔗 *Job Sources:*
+   📌 NJP — njp.gov.pk
+   🌿 Punjab — punjab.gov.pk
+   🏢 Rozee — rozee.pk
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💬 Type *menu* or *!help* for commands
+📢 Share with family & friends! 🇵🇰`;
+}
+
+// ─── Message Handler ──────────────────────────────────────────────────────────
+async function handleMessage(sock, msg, getUptime) {
+  stats.totalMessages++;
+
+  const jid = msg.key.remoteJid;
+  const text =
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    "";
+
+  if (!text) return;
+
+  const input = text.trim().toLowerCase();
+
+  // Send typing indicator
+  await sock.sendPresenceUpdate("composing", jid);
+
+  try {
+    // ── Menu triggers ──────────────────────────────────────────────────────────
+    if (["hi", "hello", "menu", "start", "salam", "/start", "/menu", "!help", "!menu", "help"].includes(input)) {
+      await sock.sendMessage(jid, { text: buildMenu() });
+      return;
+    }
+
+    // ── Numbered replies ───────────────────────────────────────────────────────
+    if (input === "1") {
+      await sock.sendMessage(jid, { text: "⏳ Fetching Govt Jobs, please wait..." });
+      const jobs = await fetchGovtJobs();
+      updateStats(jobs);
+      await sock.sendMessage(jid, { text: formatJobList(jobs, "GOVERNMENT JOBS", "🏛️") });
+      return;
+    }
+
+    if (input === "2") {
+      await sock.sendMessage(jid, { text: "⏳ Fetching Private Jobs, please wait..." });
+      const jobs = await fetchPrivateJobs();
+      updateStats(jobs);
+      await sock.sendMessage(jid, { text: formatJobList(jobs, "PRIVATE JOBS", "🏢") });
+      return;
+    }
+
+    if (input === "3") {
+      await sock.sendMessage(jid, { text: "⏳ Fetching Punjab Govt Jobs, please wait..." });
+      const jobs = await fetchPunjabJobs();
+      updateStats(jobs);
+      await sock.sendMessage(jid, { text: formatJobList(jobs, "PUNJAB GOVERNMENT JOBS", "🌿") });
+      return;
+    }
+
+    if (input === "4") {
+      await sock.sendMessage(jid, { text: "⏳ Fetching NJP Jobs, please wait..." });
+      const jobs = await fetchNJPJobs();
+      updateStats(jobs);
+      await sock.sendMessage(jid, { text: formatJobList(jobs, "NJP — NATIONAL JOB PORTAL", "📌") });
+      return;
+    }
+
+    if (input === "5") {
+      await sock.sendMessage(jid, { text: "⏳ Fetching All Jobs, please wait..." });
+      const jobs = await fetchAllJobs();
+      updateStats(jobs);
+      await sock.sendMessage(jid, { text: formatJobList(jobs, "ALL PAKISTAN JOBS TODAY", "🇵🇰") });
+      return;
+    }
+
+    // ── Commands ───────────────────────────────────────────────────────────────
+    if (input === "!ping" || input === "ping") {
+      await sock.sendMessage(jid, { text: buildPingResponse(getUptime) });
+      return;
+    }
+
+    if (input === "!time" || input === "time") {
+      await sock.sendMessage(jid, { text: buildTimeResponse() });
+      return;
+    }
+
+    if (input === "!stats" || input === "stats") {
+      await sock.sendMessage(jid, { text: buildStatsResponse() });
+      return;
+    }
+
+    if (input === "!about" || input === "about") {
+      await sock.sendMessage(jid, { text: buildAboutResponse() });
+      return;
+    }
+
+    // ── Default: show menu ──────────────────────────────────────────────────────
+    await sock.sendMessage(jid, {
+      text: `❓ Command not recognized.\n\n${buildMenu()}`,
+    });
+  } finally {
+    await sock.sendPresenceUpdate("available", jid);
+  }
 }
 
 module.exports = {
-  formatJob,
-  formatJobList,
+  handleMessage,
   formatChannelPost,
-  getMenuMessage,
-  getAboutMessage,
-  getErrorMessage,
-  getPKTime,
+  formatJobList,
+  getPakistanTime,
+  updateStats,
+  stats,
 };

@@ -1,113 +1,154 @@
-# 🇵🇰 Pakistan Jobs Bot — WhatsApp
+# 🇵🇰 Pakistan Jobs Bot v2.0
 
-A WhatsApp bot that automatically fetches and posts Pakistan job vacancies (Govt + Private) to your WhatsApp channel every 20 minutes.
-
----
-
-## ✨ Features
-
-- 🏛️ Govt jobs from NJP & Punjab Jobs Portal
-- 🏢 Private jobs from Rozee.pk
-- 📢 Auto-posts to your WhatsApp channel every 20 minutes
-- 💬 Interactive menu for DMs
-- 🔐 Session stored in PostgreSQL (no re-pairing after restart)
-- 🚀 24/7 on Heroku
+A WhatsApp bot that automatically scrapes and posts Pakistan job vacancies every 20 minutes.
 
 ---
 
-## 🚀 Deployment Guide (Heroku)
+## 📋 Features
 
-### Step 1 — Prepare GitHub Repo
+- ✅ Connects via WhatsApp Pairing Code (no QR needed)
+- ✅ Scrapes NJP, Punjab Portal & Rozee.pk every 20 minutes
+- ✅ Auto-posts jobs to a WhatsApp Channel
+- ✅ Interactive DM menu with commands
+- ✅ Session persistence via PostgreSQL (survives Heroku restarts)
+- ✅ Auto-reconnects on disconnection
+- ✅ Govt jobs always shown first
+
+---
+
+## 🛠️ Tech Stack
+
+| Component | Package |
+|-----------|---------|
+| WhatsApp | @whiskeysockets/baileys 6.6.0 |
+| Scraping | axios + cheerio |
+| Scheduler | node-cron |
+| Database | pg (PostgreSQL) |
+| Server | express |
+| Runtime | Node.js 20.x |
+
+---
+
+## 🚀 Heroku Deployment
+
+### Step 1 — Clone & Push to Heroku
 
 ```bash
 git init
 git add .
 git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/whatsapp-job-bot.git
-git push -u origin main
+heroku create pakistan-jobs-bot
+git push heroku main
 ```
 
-### Step 2 — Create Heroku App
+### Step 2 — Add PostgreSQL Addon
 
-1. Go to [heroku.com](https://heroku.com) → New → Create new app
-2. Name it (e.g. `pakistan-jobs-bot`)
-3. Go to **Deploy** tab → Connect to GitHub → Select your repo
-4. Enable **Automatic Deploys**
-
-### Step 3 — Add PostgreSQL
-
-1. Go to **Resources** tab in Heroku
-2. Search for **Heroku Postgres** → Add it (Essential-0 plan, ~$5/mo)
-3. `DATABASE_URL` will be auto-set ✅
-
-### Step 4 — Set Environment Variables
-
-Go to **Settings** → **Config Vars** → Add:
-
-| Key | Value |
-|-----|-------|
-| `PHONE_NUMBER` | `923216046022` |
-| `NODE_ENV` | `production` |
-
-*(DATABASE_URL is already set by Postgres addon)*
-
-### Step 5 — Deploy & Pair
-
-1. Click **Deploy Branch** (manual first deploy)
-2. Go to **More** → **View logs**
-3. Wait for the pairing code to appear in logs:
+```bash
+heroku addons:create heroku-postgresql:mini
 ```
-╔══════════════════════════════════╗
-║  🔑 PAIRING CODE: ABC-1234       ║
-╚══════════════════════════════════╝
+
+### Step 3 — Set Config Vars
+
+```bash
+heroku config:set PHONE_NUMBER=923216046022
+heroku config:set NODE_ENV=production
 ```
-4. On your phone → WhatsApp → Settings → Linked Devices → Link with Phone Number
-5. Enter the code → Done! ✅
+
+> `DATABASE_URL` is set automatically by the Postgres addon.
+
+### Step 4 — Check Logs for Pairing Code
+
+```bash
+heroku logs --tail
+```
+
+Look for:
+```
+╔══════════════════════════════════════╗
+║   PAIRING CODE: XXXX-XXXX            ║
+╚══════════════════════════════════════╝
+```
+
+### Step 5 — Enter Pairing Code on WhatsApp
+
+1. Open WhatsApp on your phone (number: 923216046022)
+2. Go to **Settings → Linked Devices → Link a Device**
+3. Tap **Link with phone number instead**
+4. Enter the 8-digit pairing code from logs
 
 ---
 
-## 💬 Interactive Menu (DM the bot number)
+## 📱 Bot Commands
 
-| Message | Response |
+| Command | Response |
 |---------|----------|
-| `hi` / `menu` / `start` | Show main menu |
-| `1` | Latest Govt Jobs |
-| `2` | Latest Private Jobs |
-| `3` | Punjab Jobs Portal |
-| `4` | National Job Portal |
-| `5` | All Jobs Today |
-| `6` | About Bot |
+| `hi` / `hello` / `menu` | Show main menu |
+| `1` | Government jobs |
+| `2` | Private jobs |
+| `3` | Punjab govt jobs |
+| `4` | NJP jobs |
+| `5` | All jobs today |
+| `!ping` | Bot status & uptime |
+| `!time` | Pakistan time |
+| `!stats` | Job fetch statistics |
+| `!about` | About the bot |
+| `!help` | Show menu |
 
 ---
 
 ## 📢 Channel
 
+Jobs are auto-posted every 20 minutes to:
+```
 https://whatsapp.com/channel/0029Vb7fEeo59PwPuRwAae2J
-
----
-
-## 🛠️ Local Testing
-
-```bash
-npm install
-cp .env.example .env
-# Fill in .env values
-node index.js
 ```
 
 ---
 
-## 📁 File Structure
+## 🔄 Session Persistence
+
+On every startup:
+1. Check `/tmp/auth_info/creds.json` on disk
+2. If not found → restore from PostgreSQL DB
+3. If not found in DB → request new pairing code
+4. After connecting → backup session to PostgreSQL
+5. On every `creds.update` → save to disk + backup to DB
+
+---
+
+## 📂 File Structure
 
 ```
 whatsapp-job-bot/
-├── index.js        # Main bot + pairing code
-├── scraper.js      # Job scraping (NJP, Punjab, Rozee)
-├── formatter.js    # WhatsApp message formatting
-├── scheduler.js    # Cron job (every 20 min)
-├── session.js      # PostgreSQL session storage
-├── Procfile        # Heroku config
+├── index.js       ← Main bot, pairing, message routing
+├── scraper.js     ← Job scraping (NJP, Punjab, Rozee)
+├── formatter.js   ← Message formatting + command handler
+├── scheduler.js   ← Cron job, channel posting
+├── session.js     ← PostgreSQL session backup/restore
 ├── package.json
+├── Procfile
+├── .npmrc
+├── .gitignore
 └── .env.example
 ```
+
+---
+
+## ⚠️ Important Notes
+
+- **Never install `sharp`** — it crashes on Heroku
+- **Baileys 6.7.x has pairing bugs** — stay on 6.6.0
+- If bot logs out, it clears the session and exits with code 1 — just restart it
+- The `.npmrc` file with `legacy-peer-deps=true` is required for Baileys install
+
+---
+
+## 🐛 Troubleshooting
+
+| Error | Fix |
+|-------|-----|
+| `Cannot read properties of undefined (reading 'public')` | Already fixed — bot waits for WS readyState === 1 |
+| App crashes on start | Check you don't have `sharp` installed |
+| `DATABASE_URL not found` | Add Heroku Postgres addon |
+| Bot keeps disconnecting | Normal — auto-reconnect is built in |
+| Pairing code not showing | Check `heroku logs --tail` |

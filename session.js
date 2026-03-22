@@ -3,175 +3,156 @@ const fs = require("fs");
 const path = require("path");
 
 let pool = null;
-const memoryStore = {};
-const AUTH_FOLDER = "/tmp/auth_info";
 
+// ─── DB Connection ────────────────────────────────────────────────────────────
 function getPool() {
   if (!pool && process.env.DATABASE_URL) {
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
+      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+      connectionTimeoutMillis: 10000,
+      idleTimeoutMillis: 30000,
+    });
+
+    pool.on("error", (err) => {
+      console.error("[DB] Unexpected pool error:", err.message);
     });
   }
   return pool;
 }
 
-async function initDB() {
-  const p = getPool();
-  if (!p) return;
-  try {
-    await p.query(`
-      CREATE TABLE IF NOT EXISTS whatsapp_session (
-        id TEXT PRIMARY KEY,
-        data TEXT NOT NULL,
-        updated_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    console.log("✅ Database initialized");
-  } catch (err) {
-    console.error("❌ DB init failed:", err.message);
-  }
+// ─── Ensure Table Exists ──────────────────────────────────────────────────────
+async function ensureTable(client) {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS whatsapp_session (
+      id TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      updated_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 }
 
-async function saveSession(key, value) {
-  memoryStore[key] = value;
-  const p = getPool();
-  if (!p) return;
-  try {
-    await p.query(
-      `INSERT INTO whatsapp_session (id, data, updated_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
-      [key, JSON.stringify(value)]
-    );
-  } catch (err) {
-    console.error("❌ saveSession error:", err.message);
+// ─── Backup Session Files to DB ───────────────────────────────────────────────
+async function backupSession(authDir) {
+  const db = getPool();
+  if (!db) {
+    console.log("[Session] No DATABASE_URL set. Skipping backup.");
+    return;
   }
-}
 
-async function getSession(key) {
-  if (memoryStore[key]) return memoryStore[key];
-  const p = getPool();
-  if (!p) return null;
+  const client = await db.connect().catch((err) => {
+    console.error("[Session] DB connect failed:", err.message);
+    return null;
+  });
+
+  if (!client) return;
+
   try {
-    const res = await p.query(`SELECT data FROM whatsapp_session WHERE id = $1`, [key]);
-    if (res.rows.length > 0) {
-      const val = JSON.parse(res.rows[0].data);
-      memoryStore[key] = val;
-      return val;
+    await ensureTable(client);
+
+    if (!fs.existsSync(authDir)) {
+      console.log("[Session] Auth dir not found. Nothing to backup.");
+      return;
     }
-  } catch (err) {
-    console.error("❌ getSession error:", err.message);
-  }
-  return null;
-}
 
-async function deleteSession(key) {
-  delete memoryStore[key];
-  const p = getPool();
-  if (!p) return;
-  try {
-    await p.query(`DELETE FROM whatsapp_session WHERE id = $1`, [key]);
-  } catch (err) {}
-}
+    const files = fs.readdirSync(authDir);
+    const sessionData = {};
 
-// Save all local auth files to DB
-async function saveSessionToDB(data) {
-  await saveSession("session_files", data);
-}
-
-// Load all auth files from DB
-async function loadSessionFromDB() {
-  return await getSession("session_files");
-}
-
-// Decode Levanter session ID and write creds to disk
-async function decodeLevanter(sessionId) {
-  try {
-    const axios = require("axios");
-    const encoded = sessionId.replace("levanter_", "");
-
-    if (!fs.existsSync(AUTH_FOLDER)) fs.mkdirSync(AUTH_FOLDER, { recursive: true });
-
-    // Try Levanter API endpoints
-    const urls = [
-      `https://session.levanter.biz.id/${encoded}`,
-      `https://api.levanter.biz.id/session/${encoded}`,
-    ];
-
-    for (const url of urls) {
+    for (const file of files) {
+      const filePath = path.join(authDir, file);
       try {
-        console.log("Trying Levanter API:", url);
-        const res = await axios.get(url, { timeout: 8000 });
-        if (res.data) {
-          const data = res.data;
-          if (typeof data === "object") {
-            // Write each key as a file
-            for (const [key, val] of Object.entries(data)) {
-              const filename = key.includes(".json") ? key : `${key}.json`;
-              fs.writeFileSync(path.join(AUTH_FOLDER, filename), JSON.stringify(val));
-            }
-            console.log("✅ Levanter session decoded and saved!");
-            return true;
-          }
-        }
+        const content = fs.readFileSync(filePath, "utf-8");
+        sessionData[file] = content;
       } catch (e) {
-        console.log("API failed:", e.message);
+        // Skip unreadable files
       }
     }
 
-    // Try base64 decode
-    try {
-      const decoded = Buffer.from(encoded, "base64").toString("utf8");
-      const data = JSON.parse(decoded);
-      fs.writeFileSync(path.join(AUTH_FOLDER, "creds.json"), JSON.stringify(data));
-      console.log("✅ Session decoded from base64!");
-      return true;
-    } catch (e) {}
+    if (Object.keys(sessionData).length === 0) {
+      console.log("[Session] No session files to backup.");
+      return;
+    }
 
-    return false;
+    await client.query(
+      `INSERT INTO whatsapp_session (id, data, updated_at)
+       VALUES ('main_session', $1, NOW())
+       ON CONFLICT (id) DO UPDATE SET data = $1, updated_at = NOW()`,
+      [JSON.stringify(sessionData)]
+    );
+
+    console.log(`[Session] ✅ Backed up ${Object.keys(sessionData).length} file(s) to DB.`);
   } catch (err) {
-    console.error("Levanter decode error:", err.message);
-    return false;
+    console.error("[Session] Backup error:", err.message);
+  } finally {
+    client.release();
   }
 }
 
-async function usePostgreSQLAuthState() {
-  await initDB();
+// ─── Restore Session Files from DB ───────────────────────────────────────────
+async function restoreSession(authDir) {
+  const db = getPool();
+  if (!db) {
+    console.log("[Session] No DATABASE_URL set. Skipping restore.");
+    return false;
+  }
 
-  const authState = {
-    creds: (await getSession("creds")) || {},
-    keys: {
-      get: async (type, ids) => {
-        const data = {};
-        for (const id of ids) {
-          const val = await getSession(`${type}:${id}`);
-          if (val) data[id] = val;
-        }
-        return data;
-      },
-      set: async (data) => {
-        for (const [type, ids] of Object.entries(data)) {
-          for (const [id, value] of Object.entries(ids || {})) {
-            if (value) await saveSession(`${type}:${id}`, value);
-            else await deleteSession(`${type}:${id}`);
-          }
-        }
-      },
-    },
-  };
+  const client = await db.connect().catch((err) => {
+    console.error("[Session] DB connect failed:", err.message);
+    return null;
+  });
 
-  const saveCreds = async (creds) => {
-    await saveSession("creds", creds);
-  };
+  if (!client) return false;
 
-  return { state: authState, saveCreds };
+  try {
+    await ensureTable(client);
+
+    const result = await client.query(
+      "SELECT data FROM whatsapp_session WHERE id = 'main_session' LIMIT 1"
+    );
+
+    if (result.rows.length === 0) {
+      console.log("[Session] No session found in DB.");
+      return false;
+    }
+
+    const sessionData = JSON.parse(result.rows[0].data);
+    const files = Object.keys(sessionData);
+
+    if (!fs.existsSync(authDir)) {
+      fs.mkdirSync(authDir, { recursive: true });
+    }
+
+    for (const [filename, content] of Object.entries(sessionData)) {
+      const filePath = path.join(authDir, filename);
+      fs.writeFileSync(filePath, content, "utf-8");
+    }
+
+    console.log(`[Session] ✅ Restored ${files.length} session file(s) from DB.`);
+    return true;
+  } catch (err) {
+    console.error("[Session] Restore error:", err.message);
+    return false;
+  } finally {
+    client.release();
+  }
 }
 
-module.exports = {
-  usePostgreSQLAuthState,
-  saveSessionToDB,
-  loadSessionFromDB,
-  decodeLevanter,
-  initDB,
-};
+// ─── Clear Session from DB ────────────────────────────────────────────────────
+async function clearSession() {
+  const db = getPool();
+  if (!db) return;
+
+  const client = await db.connect().catch(() => null);
+  if (!client) return;
+
+  try {
+    await client.query("DELETE FROM whatsapp_session WHERE id = 'main_session'");
+    console.log("[Session] Session cleared from DB.");
+  } catch (err) {
+    console.error("[Session] Clear error:", err.message);
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { backupSession, restoreSession, clearSession };
